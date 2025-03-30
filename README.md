@@ -1,5 +1,4 @@
 # BME 450 project - Jeremy Hampton
-“My super-cool project”
 ## Team members
 Jeremy Hampton (Jpan-11)
 ## Project decription
