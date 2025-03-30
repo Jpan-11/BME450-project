@@ -6,3 +6,5 @@ Jeremy Hampton (Jpan-11)
 Max ½ page. Include some information on:
 - what dataset you plan to use
 - goal of the project. 
+
+My Project is to use develop and train a neural network to segment the trabecular space of the distal femur.
