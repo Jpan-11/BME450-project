@@ -1,7 +1,7 @@
 # BME 450 project - Jeremy Hampton
 “My super-cool project”
 ## Team members
-NameA (GitHubUserA), NameB (GitHubUserB)
+Jeremy Hampton (Jpan-11)
 ## Project decription
 Max ½ page. Include some information on:
 - what dataset you plan to use
