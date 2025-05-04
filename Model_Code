@@ -1,0 +1,302 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader, random_split
+import numpy as np
+import cv2
+import os
+import glob
+from torchvision import transforms
+import matplotlib.pyplot as plt
+import time
+import torch.nn.init as init
+
+print("MODEL STARTING")
+
+#FastUNet Model
+class DepthwiseSeparableConv(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(DepthwiseSeparableConv, self).__init__()
+        self.depthwise = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1, groups=in_channels, bias=False)
+        self.pointwise = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        x = self.depthwise(x)
+        x = self.pointwise(x)
+        return self.relu(x)
+
+#fasUNET from pytorch
+class FastUNet(nn.Module):
+    def __init__(self, in_channels=3, out_channels=1):
+        super(FastUNet, self).__init__()
+
+        self.enc1 = nn.Sequential(
+            DepthwiseSeparableConv(in_channels, 32), #first stack of 2 convs makes 32 channels
+            DepthwiseSeparableConv(32, 32), 
+        )
+        self.pool1 = nn.MaxPool2d(2) #first maxpool
+
+        self.enc2 = nn.Sequential(
+            DepthwiseSeparableConv(32, 64), #second stack of 2 convs makes 64 channels
+            DepthwiseSeparableConv(64, 64),
+        )
+        self.pool2 = nn.MaxPool2d(2) #second maxpool
+
+        self.middle = nn.Sequential(
+            DepthwiseSeparableConv(64, 128), #third stack of 2 convs makes 128 channels
+            DepthwiseSeparableConv(128, 128),
+        )
+            #END OF ENCODER
+        self.upconv2 = nn.ConvTranspose2d(128, 64, 2, stride=2) #upconv 1
+        self.dec2 = nn.Sequential(
+            DepthwiseSeparableConv(128, 64), #bakc to 64 channels
+            DepthwiseSeparableConv(64, 64),
+        )
+
+        self.upconv1 = nn.ConvTranspose2d(64, 32, 2, stride=2)
+        self.dec1 = nn.Sequential(
+            DepthwiseSeparableConv(64, 32),
+            DepthwiseSeparableConv(32, 32),
+        )
+
+        self.final = nn.Conv2d(32, out_channels, kernel_size=1)
+
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
+                init.xavier_normal_(m.weight) 
+                if m.bias is not None:
+                    init.constant_(m.bias, 0) #bias = 0
+
+    def forward(self, x): #how the data goes through the model 
+        enc1 = self.enc1(x)
+        enc2 = self.enc2(self.pool1(enc1))
+        middle = self.middle(self.pool2(enc2))
+        up2 = self.upconv2(middle)
+        dec2 = self.dec2(torch.cat([up2, enc2], dim=1))
+        up1 = self.upconv1(dec2)
+        dec1 = self.dec1(torch.cat([up1, enc1], dim=1))
+        out = self.final(dec1)
+        return out
+
+#DataPrep
+class SegmentationDataset(Dataset):
+    def __init__(self, image_dirs, mask_dirs, transform=None):
+        self.image_paths = []
+        self.mask_paths = []
+
+        for image_dir in image_dirs:
+            self.image_paths += sorted(glob.glob(os.path.join(image_dir, "*.bmp")))
+
+        for mask_dir in mask_dirs:
+            self.mask_paths += sorted(glob.glob(os.path.join(mask_dir, "*.png")))
+
+        self.transform = transform #When image is rezized
+
+        self.mask_transform = transforms.Compose([
+            transforms.ToPILImage(),
+            transforms.Resize((64, 64)), #size line for MASKS
+            transforms.ToTensor(),
+        ])
+            #error check if scan has mask
+        if len(self.image_paths) != len(self.mask_paths):
+            raise ValueError(f"Number of images ({len(self.image_paths)}) and masks ({len(self.mask_paths)}) do not match.") 
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        image_path = self.image_paths[idx]
+        mask_path = self.mask_paths[idx]
+
+        image = cv2.imread(image_path)
+        if image is None:
+            raise FileNotFoundError(f"Image not found: {image_path}")
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+        if mask is None:
+            raise FileNotFoundError(f"Mask not found: {mask_path}")
+
+        if self.transform:
+            image = self.transform(image)
+            mask = self.mask_transform(mask)
+            mask = (mask > 0.5).float()
+
+        return image, mask
+
+#TRANSFORM LINE for SCANS
+transform = transforms.Compose([
+    transforms.ToPILImage(),
+    transforms.Resize((64, 64)), #64x64
+    transforms.ToTensor(),
+])
+
+#The images and Masks initialization wiht the file paths
+image_dirs = [
+    r"D:\\CXV007_Segmentations\\288ABXM16_Femur",
+    r"D:\\CXV007_Segmentations\\289ABXM16_Femur",
+    r"D:\\CXV007_Segmentations\\290ABXM16_Femur",
+    r"D:\\CXV007_Segmentations\\291ABXM16_Femur"
+]
+mask_dirs = [
+    r"D:\\CXV007_Segmentations2_Masks\\288ABXM16_Femur_Mask",
+    r"D:\\CXV007_Segmentations2_Masks\\289ABXM16_Femur_Mask",
+    r"D:\\CXV007_Segmentations2_Masks\\290ABXM16_Femur_Mask",
+    r"D:\\CXV007_Segmentations2_Masks\\291ABXM16_Femur_Mask"
+]
+dataset = SegmentationDataset(image_dirs, mask_dirs, transform)
+
+#0.8 train to 0.2 val
+train_size = int(0.8 * len(dataset))
+val_size = len(dataset) - train_size
+train_dataset, val_dataset = random_split(dataset, [train_size, val_size]) #the random spilt
+
+train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True) #BATCH SIZE change lines
+val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False)
+
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu") #an attept at cuda
+model = FastUNet(in_channels=3, out_channels=1).to(device) #FASTUNET definition
+
+bceloss = nn.BCEWithLogitsLoss() #loss function line
+optimizer = optim.Adam(model.parameters(), lr=1e-4) #optimizer line
+
+#initialization
+epochs = 1 #THE EPOCHS ALTER LINE
+
+train_losses = []
+val_losses = []
+for epoch in range(epochs):
+    start_time = time.time()
+    model.train()
+    train_loss = 0
+    print(f"Epoch {epoch+1}/{epochs} - Training...")
+
+    epoch_min = float('inf')
+    epoch_max = -float('inf')
+
+    for i, (images, masks) in enumerate(train_loader):
+        print(f"Batch {i+1}/{len(train_loader)} - Processing...")
+        images, masks = images.to(device), masks.to(device)
+
+        optimizer.zero_grad()
+        outputs = model(images)
+
+        epoch_min = min(epoch_min, outputs.min().item())
+        epoch_max = max(epoch_max, outputs.max().item())
+
+        loss = bceloss(outputs, masks)
+        loss.backward()
+        optimizer.step()
+
+        train_loss += loss.item()
+
+    model.eval()
+    val_loss = 0
+    with torch.no_grad():
+        for images, masks in val_loader:
+            images, masks = images.to(device), masks.to(device)
+            outputs = model(images)
+            loss = bceloss(outputs, masks)
+            val_loss += loss.item()
+
+    epoch_time = time.time() - start_time
+    print(f"Epoch [{epoch+1}/{epochs}], Train Loss: {train_loss/len(train_loader):.4f}, Val Loss: {val_loss/len(val_loader):.4f}, Time: {epoch_time:.2f} seconds")
+    print(f"Epoch [{epoch+1}/{epochs}] - Min/Max output values: {epoch_min:.4f}, {epoch_max:.4f}")
+
+    train_losses.append(train_loss / len(train_loader))
+    val_losses.append(val_loss / len(val_loader))
+
+print("MODEL FINISHED LOADING OUTPUTS")
+
+# Compute percent accuracy on validation set and output as percent
+model.eval()
+correct_pixels = 0
+total_pixels = 0
+with torch.no_grad():
+    for images, masks in val_loader:
+        images, masks = images.to(device), masks.to(device)
+        outputs = model(images)
+        preds = torch.sigmoid(outputs) > 0.5  # Binarize prediction
+        correct_pixels += (preds == masks.bool()).sum().item()
+        total_pixels += masks.numel()
+percent_accuracy = 100 * correct_pixels / total_pixels
+print(f"Validation Pixel-wise Accuracy: {percent_accuracy:.2f}%")
+
+
+# Mask save
+torch.save(model.state_dict(), "fastunet_model2.pth")
+
+#plots training ana validation loss
+plt.figure(figsize=(10, 6))
+plt.plot(range(1, epochs+1), train_losses, label='Training Loss')
+plt.plot(range(1, epochs+1), val_losses, label='Validation Loss')
+plt.xlabel('Epochs')
+plt.ylabel('Loss')
+plt.title('Training and Validation Loss')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# The .bmp scan i provide it and mask sto visually view how well the model does
+new_image_path = r"D:\CXV007_Segmentations\288ABXM16_Femur\288ABX16M_rec_Tra00000680.bmp"
+corresponding_mask_path = r"D:\CXV007_Segmentations2_Masks\288ABXM16_Femur_Mask\288ABX16M_rec_Tra_mask217.png"
+
+#make the new image 64 by 64
+image = cv2.imread(new_image_path, cv2.IMREAD_COLOR)
+if image is None:
+    raise FileNotFoundError(f"Image not found: {new_image_path}")
+image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+image_resized = cv2.resize(image, (64, 64))
+image_tensor = transform(image_resized).unsqueeze(0).to(device)
+
+# Load the corresponding ground truth mask and 64 by 64 predata it
+mask = cv2.imread(corresponding_mask_path, cv2.IMREAD_GRAYSCALE)
+if mask is None:
+    raise FileNotFoundError(f"Mask not found: {corresponding_mask_path}")
+mask_resized = cv2.resize(mask, (64, 64))
+gt_mask = (mask_resized > 127).astype(np.uint8)  # Convert to binary mask
+
+# Predict the output mask of test case
+model.eval()
+with torch.no_grad():
+    output = model(image_tensor)
+    print(f"Output before sigmoid: Min/Max values: {output.min()}, {output.max()}")
+    pred_mask = torch.sigmoid(output).squeeze().cpu().numpy()
+pred_mask_binary = (pred_mask > 0.5).astype(np.uint8) # Binarize prediction
+
+# Create yellow overlay for predicted mask
+yellow_mask = np.zeros_like(image_resized)
+yellow_mask[pred_mask_binary == 1] = [255, 255, 0]
+overlay_pred = cv2.addWeighted(image_resized, 1, yellow_mask, 0.6, 0) #the predicited mask overlayed on the scan in yellow
+
+# PLOT the results
+plt.figure(figsize=(20, 5))
+plt.subplot(1, 4, 1)
+plt.imshow(image_resized)
+plt.title("Input Image")
+plt.axis('off')
+
+plt.subplot(1, 4, 2)
+plt.imshow(gt_mask, cmap='gray')
+plt.title("Ground Truth Mask")
+plt.axis('off')
+
+plt.subplot(1, 4, 3)
+plt.imshow(pred_mask_binary, cmap='gray')
+plt.title("Predicted Mask")
+plt.axis('off')
+
+plt.subplot(1, 4, 4)
+plt.imshow(overlay_pred)
+plt.title("Prediction Overlay (Yellow)")
+plt.axis('off')
+
+plt.tight_layout()
+plt.show()
+
+
